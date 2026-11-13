@@ -476,7 +476,7 @@ input:focus, textarea:focus { outline: 3px solid color-mix(in srgb, var(--accent
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(84px + env(safe-area-inset-bottom));
+  top: calc(72px + env(safe-area-inset-top));
   transform: translateX(-50%);
   width: min(92%, 420px);
   background: #1c1917;
@@ -484,8 +484,19 @@ input:focus, textarea:focus { outline: 3px solid color-mix(in srgb, var(--accent
   padding: 12px 14px;
   border-radius: 16px;
   font-weight: 800;
-  z-index: 30;
+  z-index: 35;
   text-align: center;
+  pointer-events: none;
+  box-shadow: 0 10px 30px rgba(28, 25, 23, 0.18);
+}
+.toast.in-flow {
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
+  width: 100%;
+  margin: 0 0 12px;
+  z-index: 1;
 }
 .toast.bad { background: #9f1239; }
 .busy-flag {

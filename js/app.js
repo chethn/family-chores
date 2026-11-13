@@ -77,6 +77,7 @@ const state = {
   showEarlier: false,
   panel: null,
   draft: {},
+  settingsForm: null,
   photo: null,
 };
 
@@ -86,6 +87,9 @@ let toastTimer = 0;
 let pollTimer = 0;
 let lockTimer = 0;
 let visBound = false;
+let actionDepth = 0;
+let touchEl = null;
+let touchAt = 0;
 
 setTokenGetter(() => state.token);
 
@@ -190,22 +194,14 @@ function startPoll() {
     try {
       const count = Number(await call('unread_count')) || 0;
       if (count === state.unread) return;
-      const increased = count > state.unread;
       state.unread = count;
-      const typing = document.activeElement && /^(input|textarea|select)$/i.test(document.activeElement.tagName);
-      if (increased && !typing && !state.panel && !state.notifOpen) {
-        await loadCurrent();
-        render();
-      } else if (state.notifOpen && !typing) {
-        state.notifications = asArray(await call('list_notifications', { p_limit: 50 }));
-        render();
-      } else {
-        paintBadge();
-      }
+      // The bell is the only thing polling is allowed to touch. Rebuilding the
+      // page here recreates whatever sheet is open and wipes in-progress edits.
+      paintBadge();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'invalid_session') {
         noteError(err);
-        render();
+        render({ force: true });
       }
     }
   };
@@ -265,7 +261,7 @@ async function boot() {
       const who = await call('whoami');
       applyWho(who);
       state.screen = 'app';
-      state.tab = state.me.role === 'parent' ? 'approvals' : 'today';
+      state.tab = state.me.role === 'parent' ? 'home' : 'today';
       startPoll();
       await refresh();
       return;
@@ -326,7 +322,7 @@ async function pickProfile(id) {
       localStorage.setItem(LAST_PROFILE_KEY, profile.id);
       applyWho(who);
       state.screen = 'app';
-      state.tab = state.me.role === 'parent' ? 'approvals' : 'today';
+      state.tab = state.me.role === 'parent' ? 'home' : 'today';
       state.busy = false;
       startPoll();
       await refresh();
@@ -445,7 +441,7 @@ async function enterApp(token, profile, gen) {
     if (gen != null && gen !== pinGen) return;
     applyWho(who);
     state.screen = 'app';
-    state.tab = state.me.role === 'parent' ? 'approvals' : 'today';
+    state.tab = state.me.role === 'parent' ? 'home' : 'today';
     state.panel = null;
     state.notifOpen = false;
     state.busy = false;
@@ -480,6 +476,7 @@ async function switchAccount() {
   state.notifOpen = false;
   state.busy = false;
   state.draft = {};
+  state.settingsForm = null;
   try {
     state.profiles = asArray(await rpc('list_profiles'));
   } catch { /* keep the list we have */ }
@@ -504,7 +501,7 @@ async function loadCurrent() {
     if (state.tab === 'chores') {
       state.chores = asArray(await call('list_chores', { p_include_archived: state.showArchived }));
     }
-    if (state.tab === 'kids' && state.ledgerKid) {
+    if (state.tab === 'home' && state.ledgerKid) {
       state.ledger = asArray(await call('list_ledger', { p_kid: state.ledgerKid, p_limit: 40 }));
     }
     if (state.tab === 'wishes') {
@@ -547,10 +544,15 @@ async function refresh(opts = {}) {
 }
 
 async function setTab(tab) {
+  const changed = state.tab !== tab;
   state.tab = tab;
   state.panel = null;
   state.photo = null;
-  if (tab === 'settings') state.draft = {};
+  if (changed) {
+    state.ledgerKid = '';
+    state.ledger = [];
+    state.settingsForm = null;
+  }
   await refresh();
 }
 
@@ -780,12 +782,12 @@ async function resetCode(mode) {
   const f = state.draft;
   let pin = null;
   if (mode === 'set') {
-    if (!/^[0-9]{4}$/.test(f.newPin || '')) {
+    if (!/^[0-9]{4}$/.test(f.resetPin || '')) {
       f.error = friendlyMessage('invalid_pin_format');
       render();
       return;
     }
-    pin = f.newPin;
+    pin = f.resetPin;
   }
   state.busy = true;
   render();
@@ -801,8 +803,8 @@ async function resetCode(mode) {
 }
 
 function ensureSettingsDraft() {
-  if (state.draft.ready) return;
-  state.draft = {
+  if (state.settingsForm?.ready) return;
+  state.settingsForm = {
     ready: true,
     ratePoints: String(state.settings?.rate_points ?? 10),
     rateDollars: String(state.settings?.rate_dollars ?? 1),
@@ -815,32 +817,34 @@ function ensureSettingsDraft() {
 }
 
 async function saveRate() {
-  const points = Number(state.draft.ratePoints);
-  const dollars = Number(state.draft.rateDollars);
+  ensureSettingsDraft();
+  const f = state.settingsForm;
+  const points = Number(f.ratePoints);
+  const dollars = Number(f.rateDollars);
   if (!Number.isInteger(points) || points < 1 || points > 1000000) {
-    state.draft.rateError = 'Points must be a whole number from 1 to 1,000,000.';
+    f.rateError = 'Points must be a whole number from 1 to 1,000,000.';
     render();
     return;
   }
   if (!Number.isFinite(dollars) || dollars <= 0 || dollars > 100000) {
-    state.draft.rateError = 'Dollars must be more than 0 and at most 100,000.';
+    f.rateError = 'Dollars must be more than 0 and at most 100,000.';
     render();
     return;
   }
   state.busy = true;
-  state.draft.rateError = '';
+  f.rateError = '';
   render();
   try {
     state.settings = await call('update_settings', { p_rate_points: points, p_rate_dollars: Math.round(dollars * 100) / 100 });
-    state.draft.ratePoints = String(state.settings.rate_points);
-    state.draft.rateDollars = String(state.settings.rate_dollars);
+    f.ratePoints = String(state.settings.rate_points);
+    f.rateDollars = String(state.settings.rate_dollars);
     state.busy = false;
     showToast(`Saved. ${points} points = ${money(state.settings.rate_dollars)}`);
     await refresh({ quiet: true });
   } catch (err) {
     state.busy = false;
     if (err instanceof ApiError && err.code === 'invalid_rate') {
-      state.draft.rateError = friendlyMessage(err.code, err.detail, 'parent');
+      f.rateError = friendlyMessage(err.code, err.detail, 'parent');
       render();
       return;
     }
@@ -850,7 +854,8 @@ async function saveRate() {
 }
 
 async function changeOwnPin() {
-  const f = state.draft;
+  ensureSettingsDraft();
+  const f = state.settingsForm;
   if (!/^[0-9]{4}$/.test(f.currentPin || '') || !/^[0-9]{4}$/.test(f.newPin || '')) {
     f.pinError = friendlyMessage('invalid_pin_format');
     render();
@@ -1063,17 +1068,22 @@ async function openNotif(id) {
     noteError(err);
   }
   state.notifOpen = false;
-  if (n?.instance_id) state.tab = isParent() ? 'approvals' : 'today';
+  state.panel = null;
+  state.photo = null;
+  if (n?.instance_id) state.tab = isParent() ? 'home' : 'today';
   else if (n && (n.redeem_id || n.wish_id || String(n.kind).startsWith('redeem') || n.kind === 'wish_added')) state.tab = 'wishes';
-  else if (n && (n.kind === 'points_bonus' || n.kind === 'points_adjusted')) state.tab = isParent() ? 'kids' : 'points';
-  else if (n && (n.kind === 'pin_locked' || n.kind === 'pin_reset')) state.tab = isParent() ? 'kids' : 'today';
+  else if (n && (n.kind === 'points_bonus' || n.kind === 'points_adjusted')) state.tab = isParent() ? 'home' : 'points';
+  else if (n && (n.kind === 'pin_locked' || n.kind === 'pin_reset')) {
+    state.tab = isParent() ? 'settings' : 'today';
+    if (isParent()) state.settingsForm = null;
+  }
   await refresh();
 }
 
 async function onPhotoPicked(file) {
   if (!file) return;
   state.busy = true;
-  render();
+  render({ force: true });
   try {
     const base64 = await fileToJpegBase64(file);
     state.photo = { base64 };
@@ -1083,7 +1093,7 @@ async function onPhotoPicked(file) {
     state.draft.error = friendlyMessage(err?.code || 'invalid_photo', '', state.me?.role || '');
   } finally {
     state.busy = false;
-    render();
+    render({ force: true });
   }
 }
 
@@ -1094,6 +1104,7 @@ function askConfirm(opts) {
 }
 
 async function onAction(act, el) {
+  syncBoundFields();
   if (state.busy && act !== 'back-picker') return;
   const id = el.dataset.id || '';
   const value = el.dataset.value || '';
@@ -1236,7 +1247,7 @@ async function onAction(act, el) {
   if (act === 'submit-adjust') return submitAdjust();
   if (act === 'reset') {
     const profile = state.profiles.find((p) => p.id === id);
-    state.draft = { profileId: id, name: profile?.name || 'Them', newPin: '', error: '', confirm: false };
+    state.draft = { profileId: id, name: profile?.name || 'Them', resetPin: '', error: '', confirm: false };
     state.panel = 'reset';
     render();
     return;
@@ -1560,10 +1571,9 @@ function codeButton(profile) {
   </div>`;
 }
 
-function renderKids() {
-  const cards = state.balances.map((b) => {
-    const open = state.ledgerKid === b.kid_id;
-    return `<article class="card" data-testid="kid-balance" data-points="${Number(b.points) || 0}" data-kid="${esc(b.name)}">
+function kidBalanceCard(b) {
+  const open = state.ledgerKid === b.kid_id;
+  return `<article class="card" data-testid="kid-balance" data-points="${Number(b.points) || 0}" data-dollars="${Number(b.dollars) || 0}" data-kid="${esc(b.name)}">
       <div class="card-top">
         <h3>${esc(b.avatar || '')} ${esc(b.name)}</h3>
         <span class="pill">${esc(money(b.dollars))}</span>
@@ -1576,25 +1586,36 @@ function renderKids() {
       </div>
       ${open ? ledgerList(state.ledger) : ''}
     </article>`;
-  }).join('');
-  const parents = state.profiles.filter((p) => p.role === 'parent' && p.id !== state.me.id);
-  const kids = kidProfiles();
-  const me = state.profiles.find((p) => p.id === state.me.id) || state.me;
-  return `<div class="stack">${cards}</div>
-    <h2 class="section">Codes</h2>
+}
+
+function renderHome() {
+  const cards = state.balances.map(kidBalanceCard).join('');
+  return `<div data-testid="home">
+    ${cards ? `<div class="stack">${cards}</div>` : ''}
+    <h2 class="section">Approvals</h2>
+    ${renderApprovals()}
+  </div>`;
+}
+
+function renderFamilyCodes() {
+  const people = [
+    ...kidProfiles(),
+    ...state.profiles.filter((p) => p.role === 'parent' && p.id !== state.me?.id),
+  ];
+  if (!people.length) return '';
+  return `<h2 class="section">Family codes</h2>
     <p class="hint">Clear a code so they pick a new one, or set one for them. This also removes a lock.</p>
-    <div class="stack" style="margin-top:10px">
-      ${kids.map(codeButton).join('')}
-      ${parents.map(codeButton).join('')}
-      ${codeButton(me)}
+    <div class="stack" data-testid="family-codes" style="margin-top:10px">
+      ${people.map(codeButton).join('')}
     </div>`;
 }
 
 function renderSettings() {
   ensureSettingsDraft();
-  const f = state.draft;
+  const f = state.settingsForm;
   const others = state.profiles.filter((p) => p.role === 'parent');
-  return `<article class="card">
+  return `<div data-settings-form data-testid="settings">
+    <article class="card">
       <h2>Points to dollars</h2>
       <p class="hint">Now ${esc(String(state.settings?.rate_points))} points = ${esc(money(state.settings?.rate_dollars))}. Money is NZD. Dates use New Zealand time.</p>
       ${field('Points', 'ratePoints', { value: f.ratePoints, inputmode: 'numeric', maxlength: '7' })}
@@ -1611,15 +1632,16 @@ function renderSettings() {
       <p class="form-error">${esc(f.pinError || '')}</p>
       <div class="row">${button('Change code', 'change-pin')}</div>
     </article>
-    <p class="hint">Parents on this family: ${esc(others.map((p) => p.name).join(' and ') || 'just you')}.</p>`;
+    ${renderFamilyCodes()}
+    <p class="hint">Parents on this family: ${esc(others.map((p) => p.name).join(' and ') || 'just you')}.</p>
+  </div>`;
 }
 
 function renderMain() {
   if (state.loading) return loadingBlock();
   if (isParent()) {
-    if (state.tab === 'approvals') return renderApprovals();
+    if (state.tab === 'home') return renderHome();
     if (state.tab === 'chores') return renderChores();
-    if (state.tab === 'kids') return renderKids();
     if (state.tab === 'wishes') return renderWishes();
     return renderSettings();
   }
@@ -1638,9 +1660,8 @@ function renderTabs() {
   };
   if (isParent()) {
     return `<nav class="tabbar" aria-label="Parent">
-      ${tab('approvals', '✅', 'Approve', state.approvals.length)}
+      ${tab('home', '🏠', 'Home', state.approvals.length)}
       ${tab('chores', '📋', 'Chores', 0)}
-      ${tab('kids', '💛', 'Kids', 0)}
       ${tab('wishes', '🎁', 'Wishes', state.redeems.length)}
       ${tab('settings', '⚙️', 'Settings', 0)}
     </nav>`;
@@ -1696,6 +1717,7 @@ function renderNotifs() {
         <h2 id="notif-title">Notifications</h2>
         <button type="button" class="text-btn" data-act="close-notifs">Close</button>
       </div>
+      ${toastMarkup(true)}
       ${anyUnread ? `<div class="row">${button('Mark all read', 'mark-all', { kind: 'secondary' })}</div>` : ''}
       ${list}
     </div>
@@ -1781,7 +1803,7 @@ function renderPanel() {
       ${f.confirm
         ? `<p class="lede">Clear ${esc(f.name)}’s code?</p><div class="row">${button('Yes, clear it', 'reset-clear', { kind: 'danger' })}${button('Cancel', 'close-panel', { kind: 'ghost' })}</div>`
         : `<div class="row">${button('Clear code', 'reset-ask', { kind: 'secondary' })}</div>`}
-      ${field('Or set a new 4-digit code', 'newPin', { value: f.newPin || '', inputmode: 'numeric', maxlength: '4', mask: true })}
+      ${field('Or set a new 4-digit code', 'resetPin', { value: f.resetPin || '', inputmode: 'numeric', maxlength: '4', mask: true })}
       <p class="form-error">${esc(f.error || '')}</p>
       <div class="row">${button('Save new code', 'reset-set')}${button('Close', 'close-panel', { kind: 'ghost' })}</div>`;
   } else if (state.panel === 'wish') {
@@ -1824,6 +1846,7 @@ function renderPanel() {
       <div class="sheet-head"><h2 id="sheet-title">${esc(title)}</h2>
         <button type="button" class="text-btn" data-act="close-panel">Close</button>
       </div>
+      ${toastMarkup(true)}
       ${body}
     </div>
   </div>`;
@@ -1835,9 +1858,16 @@ function shellOpen(extra = '') {
   return `<div class="shell${state.simple ? ' simple' : ''}${extra}" style="--accent:${color};--accent-ink:${ink}" data-screen="${esc(state.screen)}" data-role="${esc(state.me?.role || '')}" data-slug="${esc(state.me?.slug || selected()?.slug || '')}">`;
 }
 
+function toastMarkup(inFlow = false) {
+  if (!state.toast) return '';
+  const kind = state.toast.kind === 'bad' ? 'bad' : 'good';
+  return `<div class="toast ${kind}${inFlow ? ' in-flow' : ''}" role="status">${esc(state.toast.text)}</div>`;
+}
+
 function overlayBits() {
+  const toast = state.screen === 'app' || state.panel || state.notifOpen ? '' : toastMarkup(false);
   return `${state.busy ? '<div class="busy-flag" role="status">Working…</div>' : ''}
-    ${state.toast ? `<div class="toast ${state.toast.kind === 'bad' ? 'bad' : 'good'}" role="status">${esc(state.toast.text)}</div>` : ''}`;
+    ${toast}`;
 }
 
 function renderBoot() {
@@ -1912,9 +1942,10 @@ function renderPin() {
 }
 
 function renderApp() {
+  const inlineToast = state.panel || state.notifOpen ? '' : toastMarkup(true);
   return `${shellOpen()}
     ${renderHeader()}
-    <main class="main">${renderMain()}</main>
+    <main class="main">${inlineToast}${renderMain()}</main>
     ${renderTabs()}
   </div>${renderNotifs()}${renderPanel()}${overlayBits()}`;
 }
@@ -1927,10 +1958,39 @@ function view() {
   return renderApp();
 }
 
-function render() {
+function isBoundField(el) {
+  return !!(el && el.matches?.('input, textarea, select') && el.dataset && 'bind' in el.dataset && el.isConnected);
+}
+
+function rememberField(el) {
+  if (!el?.dataset || !('bind' in el.dataset)) return;
+  const key = el.dataset.bind;
+  if (!key) return;
+  if (el.closest('[data-settings-form]')) {
+    if (!state.settingsForm) return;
+    state.settingsForm[key] = el.value;
+    return;
+  }
+  if (!state.draft || typeof state.draft !== 'object') state.draft = {};
+  state.draft[key] = el.value;
+}
+
+function syncBoundFields() {
+  document.querySelectorAll('#app [data-bind]').forEach((el) => rememberField(el));
+}
+
+function render(opts = {}) {
+  syncBoundFields();
+  const editing = isBoundField(document.activeElement);
+  if (editing && actionDepth === 0 && !opts.force) {
+    paintBadge();
+    return;
+  }
   const root = document.getElementById('app');
   const main = document.querySelector('.main');
   const scroll = main ? main.scrollTop : 0;
+  const sheet = document.querySelector('.sheet');
+  const sheetScroll = sheet ? sheet.scrollTop : 0;
   const active = document.activeElement;
   const bind = active?.dataset?.bind || '';
   const sel = active && 'selectionStart' in active ? active.selectionStart : null;
@@ -1941,8 +2001,15 @@ function render() {
   document.title = state.me ? `Chores · ${state.me.name}` : 'Family Chores';
   const next = document.querySelector('.main');
   if (next) next.scrollTop = scroll;
-  if (bind) {
-    const el = root.querySelector(`[data-bind="${CSS.escape(bind)}"]`);
+  const nextSheet = document.querySelector('.sheet');
+  if (nextSheet) nextSheet.scrollTop = sheetScroll;
+  if (bind && active) {
+    const scope = active.closest?.('.sheet')
+      ? root.querySelector('.sheet')
+      : active.closest?.('[data-settings-form]')
+        ? root.querySelector('[data-settings-form]')
+        : root;
+    const el = scope?.querySelector(`[data-bind="${CSS.escape(bind)}"]`);
     if (el) {
       el.focus();
       if (typeof sel === 'number' && el.setSelectionRange) {
@@ -1953,14 +2020,35 @@ function render() {
 }
 
 function runAction(act, el) {
+  actionDepth += 1;
   Promise.resolve(onAction(act, el)).catch((err) => {
     noteError(err instanceof ApiError ? err : new ApiError('network'));
     state.busy = false;
-    render();
+    render({ force: true });
+  }).finally(() => {
+    actionDepth -= 1;
   });
 }
 
+function noteTouchTarget(event) {
+  touchEl = event.target;
+  touchAt = Date.now();
+}
+
+function ignoreShiftedClick(event) {
+  if (!touchEl || Date.now() - touchAt > 1500) return false;
+  if (touchEl === event.target) return false;
+  if (touchEl.contains?.(event.target) || event.target.contains?.(touchEl)) return false;
+  if (touchEl.closest?.('button, a, .key')) return false;
+  return Boolean(touchEl.closest?.('input, textarea, select, label'));
+}
+
+document.addEventListener('touchstart', noteTouchTarget, { passive: true });
+
 document.addEventListener('click', (event) => {
+  const shifted = ignoreShiftedClick(event);
+  touchEl = null;
+  if (shifted) return;
   const backdrop = event.target.closest?.('[data-backdrop]');
   if (backdrop && event.target === backdrop && !state.busy) {
     if (backdrop.dataset.backdrop === 'notifs') state.notifOpen = false;
@@ -1969,30 +2057,34 @@ document.addEventListener('click', (event) => {
     render();
     return;
   }
+  if (event.target.closest?.('input, textarea, select, option, label') && !event.target.closest?.('button')) return;
   const el = event.target.closest?.('[data-act]');
-  if (!el) return;
+  // The form itself is tagged so Enter / keyboard Go can submit. A tap on a
+  // field bubbles to that form; saving here rebuilds the sheet and the keyboard
+  // looks like it reverted the chore.
+  if (!el || el.tagName === 'FORM') return;
   event.preventDefault();
   runAction(el.dataset.act, el);
 });
 
 document.addEventListener('submit', (event) => {
   event.preventDefault();
+  syncBoundFields();
   const form = event.target;
   if (form?.dataset?.act && !state.busy) runAction(form.dataset.act, form);
 });
 
-document.addEventListener('input', (event) => {
-  const key = event.target?.dataset?.bind;
-  if (!key || !state.draft) return;
-  state.draft[key] = event.target.value;
-});
+document.addEventListener('input', (event) => rememberField(event.target));
 
 document.addEventListener('change', (event) => {
   const input = event.target;
-  if (input?.id !== 'photo-camera' && input?.id !== 'photo-library') return;
-  const file = input.files && input.files[0];
-  input.value = '';
-  if (file) onPhotoPicked(file);
+  if (input?.id === 'photo-camera' || input?.id === 'photo-library') {
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (file) onPhotoPicked(file);
+    return;
+  }
+  rememberField(input);
 });
 
 boot();
